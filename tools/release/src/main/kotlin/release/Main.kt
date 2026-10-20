@@ -8,7 +8,7 @@ private const val USAGE = """usage:
   release plan --graph FILE [--format json|markdown] [--pr-title T --pr-base REF]"""
 
 fun main(args: Array<String>) {
-    val opts = args.drop(1).chunked(2).associate { (k, v) -> k.removePrefix("--") to v }
+    val opts = args.drop(1).chunked(2).filter { it.size == 2 }.associate { (k, v) -> k.removePrefix("--") to v }
     when (args.firstOrNull()) {
         "check-title" -> {
             val title = args.getOrNull(1) ?: fail(USAGE)
