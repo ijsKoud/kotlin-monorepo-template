@@ -42,6 +42,7 @@ A service's first release is `0.1.0`. Versions come from git tags only; Gradle r
 
 - [ ] Create the GitHub repository from this template (so template sync can link the history) and name it as you want the gitops project and namespace to be named.
 - [ ] Settings → Actions → General: allow GitHub Actions to create pull requests; default workflow permissions: read and write.
+- [ ] Optional: set the repository variable `PROJECT_NAME` (Settings → Secrets and variables → Actions → Variables) to pin the gitops project and image prefix. Without it the repository name is used, so a repository renamed after its first deploy keeps deploying to its original project and image when you set it to the old name.
 - [ ] Settings → Environments: create `production` with yourself as required reviewer.
 - [ ] Secrets available to the repo (sync them with Phase): `APP_CLIENT_ID`, `APP_PRIVATE_KEY` (GitHub App with contents write on `homelab-gitops`, plus `workflows` and pull requests write on this repo for template sync), `ARGOCD_SERVER_URL`, `ARGOCD_TOKEN`, `TAILSCALE_CLIENT_ID`, `TAILSCALE_CLIENT_SECRET`.
 - [ ] Branch protection on `main`: require the `Pull request / check` job, squash merging only, "Pull request title" as the squash commit message.
