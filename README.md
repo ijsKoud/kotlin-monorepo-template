@@ -44,12 +44,10 @@ A service's first release is `0.1.0`. Versions come from git tags only; Gradle r
 - [ ] Settings → Actions → General: allow GitHub Actions to create pull requests; default workflow permissions: read and write.
 - [ ] Optional: set the repository variable `PROJECT_NAME` (Settings → Secrets and variables → Actions → Variables) to pin the gitops project and image prefix. Without it the repository name is used, so a repository renamed after its first deploy keeps deploying to its original project and image when you set it to the old name.
 - [ ] Settings → Environments: create `production` with yourself as required reviewer.
-- [ ] Secrets available to the repo (sync them with Phase): `APP_CLIENT_ID`, `APP_PRIVATE_KEY` (GitHub App with contents write on `homelab-gitops`, plus `workflows`, pull requests and issues write on this repo for template sync; issues write is needed to create the `template_sync` label, and without the label the PR is not created), `ARGOCD_SERVER_URL`, `ARGOCD_TOKEN`, `TAILSCALE_CLIENT_ID`, `TAILSCALE_CLIENT_SECRET`.
+- [ ] Secrets available to the repo (sync them with Phase): `APP_CLIENT_ID`, `APP_PRIVATE_KEY` (GitHub App with contents write on `homelab-gitops`, plus `workflows` and pull requests write on this repo for template sync), `ARGOCD_SERVER_URL`, `ARGOCD_TOKEN`, `TAILSCALE_CLIENT_ID`, `TAILSCALE_CLIENT_SECRET`.
 - [ ] Branch protection on `main`: require the `Pull request / check` job, squash merging only, "Pull request title" as the squash commit message.
 - [ ] After the first release of each service: make its GHCR package public (Package settings → Danger zone → visibility).
 
 ## Template sync
 
 `template-sync.yaml` runs weekly in derived repos and opens a PR with changes to the shared pipeline (workflows, scripts, `build-logic`, `tools`, Dockerfile). Files in `.templatesyncignore` (apps, packages, README, the version catalog) are never touched. Edit the pipeline in the template, not in the derived repos.
-
-If a sync run fails halfway it leaves a `chore/template_sync_<hash>` branch behind, and the next runs then exit successfully without opening a PR. Delete that branch to retry.
