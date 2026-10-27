@@ -1,4 +1,4 @@
-package nl.klrnbk.hello
+package nl.klrnbk.daan.template.kotlin.hello
 
 import nl.klrnbk.common.Greeter
 import org.springframework.boot.autoconfigure.SpringBootApplication
