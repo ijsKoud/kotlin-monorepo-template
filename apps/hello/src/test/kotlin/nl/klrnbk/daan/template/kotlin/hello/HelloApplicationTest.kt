@@ -1,4 +1,4 @@
-package nl.klrnbk.hello
+package nl.klrnbk.daan.template.kotlin.hello
 
 import org.springframework.boot.test.context.SpringBootTest
 import kotlin.test.Test
