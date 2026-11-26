@@ -100,10 +100,19 @@ jobs:
           else
             git commit -m "deploy($PROJECT/$SERVICE): $VERSION"
             # Other services may push at the same time: when a push is rejected, pull their commits and try again.
+            pushed=false
             for attempt in 1 2 3; do
-              git push && break
+              if git push; then
+                pushed=true
+                break
+              fi
               git pull --rebase
             done
+
+            if [ "$pushed" != true ]; then
+              echo "::error::could not push to homelab-gitops after 3 attempts"
+              exit 1
+            fi
           fi
 
           # Argo CD must sync to this exact commit.
