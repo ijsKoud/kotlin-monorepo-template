@@ -1,7 +1,11 @@
 name: Deploy
 
-# Started by release.yaml for every release (it then waits for approval on the `production`
-# environment) and by hand for rollbacks: pick any existing version and tick `rollback`.
+# Deploys one released version of one service to the cluster:
+#   1. set the image in homelab-gitops (the commit is what Argo CD deploys)
+#   2. tell Argo CD to sync, and wait until the application is healthy
+#
+# release.yaml starts this workflow for every release, and it then waits for your approval on the
+# `production` environment. Start it by hand to roll back: pick an existing version and tick `rollback`.
 on:
   workflow_dispatch:
     inputs:
@@ -25,80 +29,97 @@ permissions:
 env:
   SERVICE: ${{ inputs.service }}
   VERSION: ${{ inputs.version }}
-  PROJECT_NAME: ${{ vars.PROJECT_NAME }} # optional: pins the gitops project / image prefix when it differs from the repo name
+  PROJECT_NAME: ${{ vars.PROJECT_NAME }} # optional: pins the gitops project and image prefix when it differs from the repo name
 
 jobs:
   deploy:
+    name: Deploy ${{ inputs.service }} ${{ inputs.version }}
     runs-on: ubuntu-latest
     environment: production # required reviewers on this environment are the approval gate
     steps:
-      - uses: actions/checkout@v7 # for .github/scripts
+      - name: Check out this repository (for .github/scripts)
+        uses: actions/checkout@v7
 
-      - name: Validate inputs
+      - name: Validate the inputs
         run: |
           [[ "$SERVICE" =~ ^[a-z0-9-]+$ ]] || { echo "invalid service: $SERVICE"; exit 1; }
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "invalid version: $VERSION"; exit 1; }
-          PROJECT=${PROJECT_NAME:-${GITHUB_REPOSITORY#*/}}
-          PROJECT=${PROJECT,,}
-          [[ "$PROJECT" =~ ^[a-z0-9-]+$ ]] || { echo "invalid project: $PROJECT"; exit 1; }
-          echo "PROJECT=$PROJECT" >> "$GITHUB_ENV"
-          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/$PROJECT-$SERVICE" >> "$GITHUB_ENV"
 
-      - name: Resolve image digest
+      - name: Work out the project and image name
         run: |
-          DIGEST=$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{.Manifest.Digest}}')
-          echo "Resolved $IMAGE:$VERSION to $DIGEST"
-          echo "IMAGE_REF=$IMAGE:$VERSION@$DIGEST" >> "$GITHUB_ENV"
+          # The project is the directory under apps/ in homelab-gitops; it defaults to the repository name.
+          project=${PROJECT_NAME:-${GITHUB_REPOSITORY#*/}}
+          project=${project,,}
+          [[ "$project" =~ ^[a-z0-9-]+$ ]] || { echo "invalid project: $project"; exit 1; }
 
-      - uses: actions/create-github-app-token@v3
+          echo "PROJECT=$project" >> "$GITHUB_ENV"
+          echo "IMAGE_NAME=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/$project-$SERVICE" >> "$GITHUB_ENV"
+
+      - name: Look up the digest of the image
+        run: |
+          digest=$(docker buildx imagetools inspect "$IMAGE_NAME:$VERSION" --format '{{.Manifest.Digest}}')
+          echo "Resolved $IMAGE_NAME:$VERSION to $digest"
+          echo "IMAGE_WITH_DIGEST=$IMAGE_NAME:$VERSION@$digest" >> "$GITHUB_ENV"
+
+      - name: Create a GitHub App token for homelab-gitops
         id: app-token
+        uses: actions/create-github-app-token@v3
         with:
           client-id: ${{ secrets.APP_CLIENT_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: homelab-gitops
 
-      - uses: actions/checkout@v7
+      - name: Check out homelab-gitops
+        uses: actions/checkout@v7
         with:
           repository: ${{ github.repository_owner }}/homelab-gitops
           token: ${{ steps.app-token.outputs.token }}
           path: gitops
 
-      - name: Update image in gitops
+      - name: Point the gitops manifests at the new image
         id: gitops
         env:
           ROLLBACK: ${{ inputs.rollback }}
-        run: .github/scripts/gitops-set-image.sh gitops "apps/$PROJECT/$SERVICE" "$IMAGE" "$IMAGE_REF" "$VERSION" "$ROLLBACK"
+        run: |
+          .github/scripts/gitops-set-image.sh \
+            gitops "apps/$PROJECT/$SERVICE" "$IMAGE_NAME" "$IMAGE_WITH_DIGEST" "$VERSION" "$ROLLBACK"
 
-      - name: Commit and push
-        if: steps.gitops.outputs.skip != 'true'
+      # The next steps only run when gitops did not already hold a newer version.
+
+      - name: Commit and push to homelab-gitops
+        if: steps.gitops.outputs.needs_deploy == 'true'
         working-directory: gitops
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
+
           if git diff --staged --quiet; then
-            echo "gitops already references $IMAGE_REF"
+            echo "gitops already references $IMAGE_WITH_DIGEST, nothing to commit"
           else
             git commit -m "deploy($PROJECT/$SERVICE): $VERSION"
-            # other services may push at the same time
+            # Other services may push at the same time: when a push is rejected, pull their commits and try again.
             for attempt in 1 2 3; do
               git push && break
               git pull --rebase
             done
           fi
-          echo "REVISION=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
-      - uses: tailscale/github-action@v4
-        if: steps.gitops.outputs.skip != 'true'
+          # Argo CD must sync to this exact commit.
+          echo "GITOPS_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Connect to the tailnet (Argo CD is only reachable there)
+        if: steps.gitops.outputs.needs_deploy == 'true'
+        uses: tailscale/github-action@v4
         with:
           oauth-client-id: ${{ secrets.TAILSCALE_CLIENT_ID }}
           oauth-secret: ${{ secrets.TAILSCALE_CLIENT_SECRET }}
           tags: tag:ci
 
-      - name: Sync ArgoCD and wait until healthy
-        if: steps.gitops.outputs.skip != 'true'
+      - name: Sync Argo CD and wait until the application is healthy
+        if: steps.gitops.outputs.needs_deploy == 'true'
         env:
           ARGOCD_SERVER_URL: ${{ secrets.ARGOCD_SERVER_URL }}
           ARGOCD_TOKEN: ${{ secrets.ARGOCD_TOKEN }}
-        run: .github/scripts/argocd-sync-wait.sh "$PROJECT-$SERVICE" "$REVISION"
+        run: .github/scripts/argocd-sync-wait.sh "$PROJECT-$SERVICE" "$GITOPS_COMMIT"

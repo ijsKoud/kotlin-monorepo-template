@@ -1,67 +1,102 @@
 name: Release
 
-# Every merge to main releases each affected service: image, tag and GitHub Release.
-# Nothing is deployed here; deploy.yaml is dispatched per service and waits for approval.
+# Every merge to main releases each service that changed: a container image, a git tag and a GitHub Release.
+# Nothing is deployed here. For every release this workflow starts deploy.yaml, which waits for your approval.
+#
+#   plan     decide which services to release, and which version each one gets
+#   build    build and push one image per release
+#   release  create the GitHub Releases and start the deployments
 on:
   push:
     branches: [main]
 
 permissions:
-  contents: write
-  packages: write
-  actions: write
+  contents: write # create tags and GitHub Releases
+  packages: write # push images to ghcr.io
+  actions: write # start deploy.yaml
 
 concurrency:
   group: release
-  cancel-in-progress: false
+  cancel-in-progress: false # releases queue up so two merges never compute the same version
 
 jobs:
   plan:
+    name: Plan the releases
     runs-on: ubuntu-latest
+    env:
+      RELEASE_TOOL: tools/release/build/install/release/bin/release
     outputs:
-      any: ${{ steps.plan.outputs.any }}
-      matrix: ${{ steps.plan.outputs.matrix }}
-      plan: ${{ steps.plan.outputs.plan }}
+      plan_json: ${{ steps.plan.outputs.plan_json }}
+      build_matrix: ${{ steps.plan.outputs.build_matrix }}
+      has_releases: ${{ steps.plan.outputs.has_releases }}
     steps:
-      - uses: actions/checkout@v7
+      - name: Check out the code with its full history
+        uses: actions/checkout@v7
         with:
-          fetch-depth: 0
-      - uses: actions/setup-java@v6
+          fetch-depth: 0 # the release tool reads tags and history
+
+      - name: Set up Java 25
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: 25
-      - uses: gradle/actions/setup-gradle@v6
-      - run: ./gradlew --quiet projectGraph :tools:release:installDist
-      - id: plan
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Build the release tool and write the project graph
+        run: ./gradlew --quiet projectGraph :tools:release:installDist
+
+      - name: Work out the releases
+        id: plan
         run: |
-          tools/release/build/install/release/bin/release plan --graph build/project-graph.tsv > plan.json
+          # plan.json looks like {"releases":[{"service":"hello","version":"0.2.0","tag":"hello/v0.2.0", ...}]}
+          $RELEASE_TOOL plan --graph build/project-graph.tsv > plan.json
           cat plan.json
-          echo "plan=$(cat plan.json)" >> "$GITHUB_OUTPUT"
-          echo "matrix=$(jq -c '{include: .releases}' plan.json)" >> "$GITHUB_OUTPUT"
-          echo "any=$(jq '.releases | length > 0' plan.json)" >> "$GITHUB_OUTPUT"
+
+          # One build matrix entry per release; each entry becomes matrix.service, matrix.version, ...
+          build_matrix=$(jq -c '{include: .releases}' plan.json)
+          # "false" skips the build and release jobs when nothing needs releasing.
+          has_releases=$(jq '.releases | length > 0' plan.json)
+
+          {
+            echo "plan_json=$(cat plan.json)"
+            echo "build_matrix=$build_matrix"
+            echo "has_releases=$has_releases"
+          } >> "$GITHUB_OUTPUT"
 
   build:
+    name: Build image (${{ matrix.service }} ${{ matrix.version }})
     needs: plan
-    if: needs.plan.outputs.any == 'true'
-    runs-on: ubuntu-26.04-arm
+    if: needs.plan.outputs.has_releases == 'true'
+    runs-on: ubuntu-26.04-arm # the cluster runs on arm64, so build natively instead of emulating
     strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+      fail-fast: false # a failing service does not stop the others from building
+      matrix: ${{ fromJson(needs.plan.outputs.build_matrix) }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: docker/setup-buildx-action@v4
-      - uses: docker/login-action@v4
+      - name: Check out the code
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to the GitHub container registry
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
-      - name: Image name
+
+      - name: Work out the image name
         env:
           PROJECT_NAME: ${{ vars.PROJECT_NAME }} # optional: pins the image prefix when it differs from the repo name
         run: |
-          PROJECT=${PROJECT_NAME:-${GITHUB_REPOSITORY#*/}}
-          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${PROJECT,,}-${{ matrix.service }}" >> "$GITHUB_ENV"
-      - uses: docker/build-push-action@v7
+          project=${PROJECT_NAME:-${GITHUB_REPOSITORY#*/}}
+          # Registry names must be lowercase.
+          echo "IMAGE_NAME=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${project,,}-${{ matrix.service }}" >> "$GITHUB_ENV"
+
+      - name: Build and push the image
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/arm64
@@ -70,25 +105,35 @@ jobs:
           build-args: |
             APP=${{ matrix.service }}
             VERSION=${{ matrix.version }}
-          tags: ${{ env.IMAGE }}:${{ matrix.version }}
+          tags: ${{ env.IMAGE_NAME }}:${{ matrix.version }}
           labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
 
   release:
+    name: Create releases and request deployments
     needs: [plan, build]
     runs-on: ubuntu-latest
     env:
-      GH_TOKEN: ${{ github.token }}
-      GH_REPO: ${{ github.repository }}
-      PLAN: ${{ needs.plan.outputs.plan }}
+      GH_TOKEN: ${{ github.token }} # the gh CLI reads its token from here
+      GH_REPO: ${{ github.repository }} # and the repository to talk to
+      RELEASE_PLAN: ${{ needs.plan.outputs.plan_json }}
     steps:
-      - name: Create releases and request deployments
+      - name: Create a GitHub Release per service and start its deployment
         run: |
-          jq -r '.releases[] | [.service, .version, .tag, (.previous // "")] | @tsv' <<< "$PLAN" |
-          while IFS=$'\t' read -r service version tag previous; do
-            # idempotent so a re-run of this job does not fail on releases that already exist
+          # One tab-separated line per release: service, version, tag, previous version (empty for a first release).
+          jq -r '.releases[] | [.service, .version, .tag, (.previous // "")] | @tsv' <<< "$RELEASE_PLAN" |
+          while IFS=$'\t' read -r service version tag previous_version; do
+
+            # A re-run of this job must not fail on releases that already exist.
             if ! gh release view "$tag" > /dev/null 2>&1; then
-              gh release create "$tag" --target "$GITHUB_SHA" --title "$service $version" --generate-notes \
-                ${previous:+--notes-start-tag "$service/v$previous"}
+              release_notes_args=()
+              if [ -n "$previous_version" ]; then
+                # Only list the changes since this service's previous release.
+                release_notes_args=(--notes-start-tag "$service/v$previous_version")
+              fi
+              gh release create "$tag" --target "$GITHUB_SHA" --title "$service $version" \
+                --generate-notes "${release_notes_args[@]}"
             fi
+
+            # deploy.yaml waits for approval on the `production` environment before it deploys.
             gh workflow run deploy.yaml -f service="$service" -f version="$version"
           done

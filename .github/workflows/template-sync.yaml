@@ -1,10 +1,10 @@
 name: Template sync
 
-# Opens a PR in repositories created from the template when the template's pipeline files change.
-# Keep repo-specific files out of the sync with .templatesyncignore.
+# Opens a pull request in repositories created from the template when the template's pipeline files change.
+# Files that belong to the repository itself are kept out of the sync by .templatesyncignore.
 on:
   schedule:
-    - cron: "0 6 * * 1"
+    - cron: "0 6 * * 1" # Mondays at 06:00 UTC
   workflow_dispatch:
 
 env:
@@ -12,20 +12,27 @@ env:
 
 jobs:
   sync:
+    name: Sync with the template
+    # Never run in the template itself. (The job `if` cannot read env, so the name is repeated here.)
     if: github.repository != 'ijskoud/kotlin-monorepo-template'
     runs-on: ubuntu-latest
     steps:
-      # The GitHub App needs `workflows` permission to push changes to .github/workflows.
-      - uses: actions/create-github-app-token@v3
+      # The GitHub App needs the `workflows` permission to push changes to .github/workflows.
+      - name: Create a GitHub App token
         id: app-token
+        uses: actions/create-github-app-token@v3
         with:
           client-id: ${{ secrets.APP_CLIENT_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
-      - uses: actions/checkout@v7
+
+      - name: Check out this repository
+        uses: actions/checkout@v7
         with:
           token: ${{ steps.app-token.outputs.token }}
-      - uses: AndreasAugustin/actions-template-sync@v2.6.0
+
+      - name: Open a pull request with the template changes
+        uses: AndreasAugustin/actions-template-sync@v2.6.0
         with:
           source_repo_path: ${{ env.TEMPLATE_REPO }}
           source_gh_token: ${{ steps.app-token.outputs.token }}
